@@ -41,18 +41,20 @@ extension PluginError: CustomStringConvertible {
     /// - Throws: If the product cannot be built or if packaging and uploading it fails.
     func performCommand(context: PluginContext, arguments: [String]) async throws {
         var extractor = ArgumentExtractor(arguments)
-        if extractor.extractFlag(named: "help") > 0 {
-            print(
-                """
-                USAGE: build-container-image <options>
+        let helperURL = try context.tool(named: "containertool").url
+        let helperEnv = ProcessInfo.processInfo.environment.filter { $0.key.starts(with: "CONTAINERTOOL_") }
 
-                OPTIONS
-                  --product      Product to include in the image
-                  --resources    Directory of resources to include in the image
-
-                Other arguments are passed to the containertool helper.
-                """
+        if extractor.extractFlag(named: "help") > 0 || arguments.contains("-h") {
+            let out = Pipe()
+            async let helpData = Task { out.fileHandleForReading.readDataToEndOfFile() }.value
+            try await run(
+                command: helperURL,
+                arguments: ["--help"],
+                environment: helperEnv,
+                outputPipe: out
             )
+            let rawHelp = String(data: await helpData, encoding: .utf8) ?? ""
+            print(formatPluginHelp(rawHelp), terminator: rawHelp.hasSuffix("\n") ? "" : "\n")
             return
         }
 
@@ -110,12 +112,10 @@ extension PluginError: CustomStringConvertible {
         }
 
         // Run a command line helper to upload the image
-        let helperURL = try context.tool(named: "containertool").url
         let helperArgs =
             resources.map { "--resources=\($0)" }
             + builtExecutables.map { $0.url.path }
             + extractor.remainingArguments
-        let helperEnv = ProcessInfo.processInfo.environment.filter { $0.key.starts(with: "CONTAINERTOOL_") }
         // Capture before entering the task group so the package directory is Sendable.
         let packageDirectory = context.package.directoryURL
 
@@ -190,4 +190,20 @@ extension Collection where Element: Equatable {
 
         return (self[..<idx], self[idx...].dropFirst())
     }
+}
+
+private func formatPluginHelp(_ helperHelp: String) -> String {
+    let productOption = "  --product <product>     Product to include in the image\n"
+    var formatted = helperHelp.replacingOccurrences(
+        of: "USAGE: containertool [<options>] <executable>",
+        with: "USAGE: swift package build-container-image [<options>]"
+    )
+    formatted = formatted.replacingOccurrences(
+        of: "\nARGUMENTS:\n  <executable>            Executable to package\n",
+        with: ""
+    )
+    if let range = formatted.range(of: "\nOPTIONS:\n") {
+        formatted.insert(contentsOf: productOption, at: range.upperBound)
+    }
+    return formatted
 }
